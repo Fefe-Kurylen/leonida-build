@@ -1,0 +1,139 @@
+# Compile Lamsa — dans leonida-build pour réutiliser les mêmes clés Apple que Leonida.
+# Compile Lamsa (iPhone + Android) et l'envoie chez Apple et Google.
+# Le code source reste dans le dépôt privé Fefe-Kurylen/Lamsa : il est récupéré uniquement le temps de la compilation.
+# Aucun fichier n'est publié (pas d'artefacts) ; les clés sont des secrets masqués dans les journaux.
+name: Lamsa
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "Action"
+        type: choice
+        options: [beta, release]
+        default: beta
+      submit:
+        description: "Soumettre à Apple (avec « release »)"
+        type: boolean
+        default: false
+      android:
+        description: "Envoyer aussi sur Google Play"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: ["lamsa-trigger.txt"]
+
+concurrency:
+  group: lamsa-testflight
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  LAMSA_FIREBASE_CONFIG: ${{ secrets.LAMSA_FIREBASE_CONFIG }}
+  LAMSA_WORKER_URL: ${{ secrets.LAMSA_WORKER_URL }}
+
+jobs:
+  ios:
+    if: github.repository_owner == 'Fefe-Kurylen'
+    runs-on: macos-15
+    env:
+      LANE: ${{ github.event.inputs.lane || 'beta' }}
+    steps:
+      - name: Récupérer le code privé de Lamsa
+        uses: actions/checkout@v4
+        with:
+          repository: Fefe-Kurylen/Lamsa
+          token: ${{ secrets.LAMSA_TOKEN || secrets.LEONIDA_TOKEN }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Construire l'appli et la copier dans le projet iPhone
+        run: |
+          npm ci --no-audit --no-fund --silent
+          npm run build
+          if [ -n "${{ secrets.GOOGLE_SERVICE_INFO_PLIST }}" ]; then echo "${{ secrets.GOOGLE_SERVICE_INFO_PLIST }}" | base64 --decode > ios/App/App/GoogleService-Info.plist; fi
+          npx cap sync ios > /dev/null
+
+      - name: Choisir le Xcode le plus récent
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)
+          if [ -n "$XC" ]; then sudo xcode-select -s "$XC"; fi
+          xcodebuild -version
+
+      - name: Installer fastlane
+        working-directory: ios/App
+        run: |
+          gem install bundler --silent
+          bundle install --quiet
+
+      - name: TestFlight / App Store
+        working-directory: ios/App
+        run: |
+          export BUILD_NUMBER=$((GITHUB_RUN_NUMBER + 100))
+          bundle exec fastlane ios ${{ env.LANE }}
+        env:
+          CI: true
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+          SUBMIT: ${{ github.event.inputs.submit }}
+          FASTLANE_SKIP_UPDATE_CHECK: 1
+
+  android:
+    if: github.repository_owner == 'Fefe-Kurylen' && github.event.inputs.android == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le code privé de Lamsa
+        uses: actions/checkout@v4
+        with:
+          repository: Fefe-Kurylen/Lamsa
+          token: ${{ secrets.LAMSA_TOKEN || secrets.LEONIDA_TOKEN }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Construire l'appli et la copier dans le projet Android
+        run: |
+          npm ci --no-audit --no-fund --silent
+          npm run build
+          if [ -n "${{ secrets.GOOGLE_SERVICES_JSON }}" ]; then echo "${{ secrets.GOOGLE_SERVICES_JSON }}" | base64 --decode > android/app/google-services.json; fi
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/lamsa.keystore"
+          npx cap sync android > /dev/null
+
+      - name: Compiler le paquet Google Play (.aab signé)
+        working-directory: android
+        run: |
+          export BUILD_NUMBER=$((GITHUB_RUN_NUMBER + 100))
+          chmod +x gradlew
+          ./gradlew bundleRelease --no-daemon -q
+        env:
+          ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/lamsa.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Envoyer sur Google Play (test interne)
+        if: env.PLAY_JSON != ''
+        uses: r0adkll/upload-google-play@v1
+        env:
+          PLAY_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.kurylen.lamsa
+          releaseFiles: android/app/build/outputs/bundle/release/app-release.aab
+          track: ${{ github.event.inputs.lane == 'release' && 'production' || 'internal' }}
+          status: completed
