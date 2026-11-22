@@ -1,0 +1,74 @@
+# Compile l'appli iPhone Shasha et l'envoie sur TestFlight.
+# Le code source reste dans le dépôt privé Fefe-Kurylen/Shasha : il est récupéré uniquement le temps de la compilation.
+# Aucun fichier n'est publié (pas d'artefacts) ; les clés sont des secrets masqués dans les journaux.
+name: Shasha TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "Action"
+        type: choice
+        options: [beta, release]
+        default: beta
+      submit:
+        description: "Soumettre à Apple (avec « release »)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: ["trigger-shasha.txt"]
+
+concurrency:
+  group: shasha-testflight
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ios:
+    if: github.repository_owner == 'Fefe-Kurylen'
+    runs-on: macos-15
+    env:
+      LANE: ${{ github.event.inputs.lane || 'beta' }}
+    steps:
+      - name: Récupérer le code privé de Shasha
+        uses: actions/checkout@v4
+        with:
+          repository: Fefe-Kurylen/Shasha
+          token: ${{ secrets.SHASHA_TOKEN }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Choisir le Xcode le plus récent
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)
+          if [ -n "$XC" ]; then sudo xcode-select -s "$XC"; fi
+          xcodebuild -version
+
+      - name: Préparer le projet iPhone
+        run: bash ios-ci/prepare-ios.sh
+
+      - name: Installer fastlane
+        working-directory: ios/App
+        run: |
+          gem install bundler --silent
+          bundle install --quiet
+
+      - name: TestFlight / App Store
+        working-directory: ios/App
+        run: |
+          export BUILD_NUMBER=$((GITHUB_RUN_NUMBER + 100))
+          bundle exec fastlane ios ${{ env.LANE }}
+        env:
+          CI: true
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+          SUBMIT: ${{ github.event.inputs.submit }}
+          FASTLANE_SKIP_UPDATE_CHECK: 1
