@@ -53,6 +53,31 @@ jobs:
         with:
           node-version: 22
 
+      - name: Vérifier la clé Apple (identifiant et contenu)
+        env:
+          KID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISS: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          KEY: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+        run: |
+          node -e '
+          const crypto=require("crypto");
+          let key=(process.env.KEY||"").trim();
+          if(!key.includes("BEGIN PRIVATE KEY")){try{const d=Buffer.from(key,"base64").toString();if(d.includes("BEGIN PRIVATE KEY"))key=d}catch(e){}}
+          console.log("Contenu de la clé .p8 reconnu :", key.includes("BEGIN PRIVATE KEY")?"oui":"NON");
+          const raw=(process.env.KID||"").trim(), m=raw.match(/[A-Z0-9]{10}/);
+          console.log("Identifiant de clé au bon format (10 caractères) :", /^[A-Z0-9]{10}$/.test(raw)?"oui":"non, je le déduis");
+          const cands=[...new Set([m&&m[0],"G48U8R4FJ7","R3CB57DAX3"].filter(Boolean))];
+          const b=o=>Buffer.from(JSON.stringify(o)).toString("base64url");
+          (async()=>{for(const kid of cands){try{
+            const h=b({alg:"ES256",kid,typ:"JWT"}),p=b({iss:process.env.ISS,iat:Math.floor(Date.now()/1000),exp:Math.floor(Date.now()/1000)+600,aud:"appstoreconnect-v1"});
+            const sig=crypto.sign("sha256",Buffer.from(h+"."+p),{key,dsaEncoding:"ieee-p1363"}).toString("base64url");
+            const r=await fetch("https://api.appstoreconnect.apple.com/v1/apps?limit=1",{headers:{Authorization:"Bearer "+h+"."+p+"."+sig}});
+            console.log("Essai identifiant",kid,"→",r.status);
+            if(r.ok){require("fs").appendFileSync(process.env.GITHUB_ENV,"ASC_KEY_ID="+kid+"\n");return}
+          }catch(e){console.log("Essai",kid,"→ erreur",e.message.slice(0,80))}}
+          console.log("❌ Aucune clé Apple ne fonctionne : le secret APP_STORE_CONNECT_KEY_CONTENT ne contient pas la bonne clé .p8");process.exit(1)})()'
+
+
       - name: Construire l'appli et la copier dans le projet iPhone
         run: |
           npm ci --no-audit --no-fund --silent
@@ -80,7 +105,7 @@ jobs:
         env:
           CI: true
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_KEY_ID: ${{ env.ASC_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
           SUBMIT: ${{ github.event.inputs.submit }}
