@@ -70,6 +70,10 @@ jobs:
 
 
       - name: Construire l'appli et la copier dans le projet iPhone
+        env:
+          # beta = version test TestFlight : tout débloqué, sans paiement (jamais envoyée en vérification App Store)
+          # release = version App Store normale (gratuite + abonnement)
+          LEONIDA_TEST_ACCESS: ${{ env.LANE == 'beta' && '1' || '0' }}
         run: |
           npm ci --no-audit --no-fund --silent
           python3 src/build.py > /dev/null
