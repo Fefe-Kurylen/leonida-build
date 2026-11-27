@@ -11,3 +11,9 @@ Lancer une compilation : onglet **Actions › Leonida TestFlight › Run workflo
 Même circuit pour **Shasha** (lecteur IPTV, éditeur Kurylen) : le code privé `Fefe-Kurylen/Shasha` est récupéré le temps de la compilation (secret `SHASHA_TOKEN`), puis l'appli part sur TestFlight.
 
 Lancer : **Actions › Shasha TestFlight › Run workflow**, ou modifier `trigger-shasha.txt`.
+
+## Mizan
+
+Même circuit pour **Mizan** (gestion de budget, éditeur Kurylen) : le code privé `Fefe-Kurylen/Mizan` est récupéré le temps de la compilation (secret `MIZAN_TOKEN`, ou le jeton Lamsa/Leonida si le dépôt Mizan y est ajouté), puis l'appli part sur TestFlight.
+
+Lancer : **Actions › Mizan › Run workflow**, ou modifier `mizan-trigger.txt`.

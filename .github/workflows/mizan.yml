@@ -1,0 +1,88 @@
+# Compile Mizan (iPhone) — dans leonida-build pour réutiliser les clés Apple déjà enregistrées.
+# Le code reste dans le dépôt privé Fefe-Kurylen/Mizan : récupéré le temps de la compilation, rien n'est publié ici.
+# Archive non signée puis signature App Store automatique à l'export (clé App Store Connect) → envoi sur App Store Connect (TestFlight).
+name: Mizan
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["mizan-trigger.txt"]
+concurrency:
+  group: mizan-ios
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  ios:
+    if: github.repository_owner == 'Fefe-Kurylen'
+    runs-on: macos-26
+    steps:
+      - name: Récupérer le code privé de Mizan
+        uses: actions/checkout@v4
+        with:
+          repository: Fefe-Kurylen/Mizan
+          token: ${{ secrets.MIZAN_TOKEN || secrets.LAMSA_TOKEN || secrets.LEONIDA_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Vérifier la clé Apple
+        env:
+          KID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISS: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          KEY: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+        run: |
+          node -e '
+          const crypto=require("crypto"),fs=require("fs"),os=require("os");
+          let key=(process.env.KEY||"").trim();
+          if(!key.includes("BEGIN PRIVATE KEY")){try{const d=Buffer.from(key,"base64").toString();if(d.includes("BEGIN PRIVATE KEY"))key=d}catch(e){}}
+          const raw=(process.env.KID||"").trim(),m=raw.match(/[A-Z0-9]{10}/);
+          const cands=[...new Set([m&&m[0],"G48U8R4FJ7","R3CB57DAX3"].filter(Boolean))];
+          const b=o=>Buffer.from(JSON.stringify(o)).toString("base64url");
+          (async()=>{for(const kid of cands){try{
+            const h=b({alg:"ES256",kid,typ:"JWT"}),p=b({iss:process.env.ISS,iat:Math.floor(Date.now()/1000),exp:Math.floor(Date.now()/1000)+600,aud:"appstoreconnect-v1"});
+            const sig=crypto.sign("sha256",Buffer.from(h+"."+p),{key,dsaEncoding:"ieee-p1363"}).toString("base64url");
+            const r=await fetch("https://api.appstoreconnect.apple.com/v1/apps?filter[bundleId]=fr.kurylen.mizan",{headers:{Authorization:"Bearer "+h+"."+p+"."+sig}});
+            console.log("Clé",kid,"→",r.status);
+            if(r.ok){const j=await r.json();console.log(j.data.length?"✅ Fiche App Store Connect trouvée : "+j.data[0].attributes.name:"⚠️ Aucune fiche App Store Connect pour fr.kurylen.mizan : créez-la (Mes apps → +) avant l envoi");
+              fs.mkdirSync(os.homedir()+"/private_keys",{recursive:true});fs.writeFileSync(os.homedir()+"/private_keys/AuthKey_"+kid+".p8",key);
+              fs.appendFileSync(process.env.GITHUB_ENV,"ASC_KEY_ID="+kid+"\n");return}
+          }catch(e){console.log("Clé",kid,"→ erreur",e.message.slice(0,80))}}
+          console.log("❌ Aucune clé Apple ne fonctionne");process.exit(1)})()'
+      - name: Xcode le plus récent (SDK iOS 26 exigé)
+        run: |
+          X=$(ls -d /Applications/Xcode_*.app | grep -vi beta | sort -V | tail -1)
+          sudo xcode-select -s "$X" && xcodebuild -version
+      - name: Interface → projet iPhone
+        working-directory: mobile
+        run: npm ci --no-audit --no-fund && python3 make-mobile.py && npx cap sync ios
+      - name: Archive (non signée)
+        working-directory: mobile
+        run: |
+          V=$(node -p "require('./package.json').version"); BUILD=$((100 + ${{ github.run_number }}))
+          xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath build/App.xcarchive \
+            DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }} CODE_SIGN_STYLE=Automatic MARKETING_VERSION=$V CURRENT_PROJECT_VERSION=$BUILD \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= archive | tail -n 40
+          test ${PIPESTATUS[0]} -eq 0
+      - name: Signature App Store + envoi sur App Store Connect
+        working-directory: mobile
+        run: |
+          cat > build/ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>${{ secrets.APPLE_TEAM_ID }}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>uploadSymbols</key><true/>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath build/App.xcarchive -exportOptionsPlist build/ExportOptions.plist \
+            -exportPath build/export -allowProvisioningUpdates -authenticationKeyPath ~/private_keys/AuthKey_$ASC_KEY_ID.p8 \
+            -authenticationKeyID $ASC_KEY_ID -authenticationKeyIssuerID ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }} | tail -n 40
+          test ${PIPESTATUS[0]} -eq 0
+          echo "✅ Mizan $(node -p "require('./package.json').version") ($((100 + ${{ github.run_number }}))) envoyée sur App Store Connect → TestFlight" | tee -a $GITHUB_STEP_SUMMARY
+      - if: always()
+        run: rm -rf ~/private_keys
